@@ -1,4 +1,4 @@
-/* Copyright (C) 2006-2015 P. F. Chimento
+/* Copyright (C) 2006-2015, 2018 P. F. Chimento
  * This file is part of GNOME Inform 7.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -22,7 +22,7 @@
 #include <gtk/gtk.h>
 #include <glib/gi18n.h>
 #include <glib/gstdio.h>
-#include <webkit/webkit.h>
+#include <webkit2/webkit2.h>
 
 #ifdef HAVE_CONFIG_H
 #  include "config.h"

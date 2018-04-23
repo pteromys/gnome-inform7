@@ -1,4 +1,4 @@
-/* Copyright (C) 2006-2009, 2010, 2014 P. F. Chimento
+/* Copyright (C) 2006-2009, 2010, 2014, 2018 P. F. Chimento
  * This file is part of GNOME Inform 7.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -17,7 +17,7 @@
 
 #include <glib.h>
 #include <gtk/gtk.h>
-#include <webkit/webkit.h>
+#include <webkit2/webkit2.h>
 #include "panel.h"
 #include "panel-private.h"
 
@@ -91,11 +91,11 @@ history_goto_current(I7Panel *panel)
 			gtk_notebook_set_current_page(GTK_NOTEBOOK(panel->tabs[current->pane]), current->tab);
 			break;
 		case I7_PANE_DOCUMENTATION:
-			webkit_web_view_open(WEBKIT_WEB_VIEW(panel->tabs[I7_PANE_DOCUMENTATION]), current->page);
+			webkit_web_view_load_uri(WEBKIT_WEB_VIEW(panel->tabs[I7_PANE_DOCUMENTATION]), current->page);
 			/* Deprecated in 1.1.1 */
 			break;
 		case I7_PANE_EXTENSIONS:
-			webkit_web_view_open(WEBKIT_WEB_VIEW(panel->tabs[I7_PANE_EXTENSIONS]), current->page);
+			webkit_web_view_load_uri(WEBKIT_WEB_VIEW(panel->tabs[I7_PANE_EXTENSIONS]), current->page);
 		default:
 			;
 	}
