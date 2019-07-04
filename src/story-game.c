@@ -189,10 +189,21 @@ struct RunSkeinData {
 	GFile *file_to_run;
 
 	GSList *commands;
+	GSList *blessed_nodes;
+	GSList *node;
 	unsigned long started_handler, waiting_handler;
 	gboolean finished; /* don't have to use a GCond because this communication
 	is within the same thread and only one way? */
 };
+
+/* callback to stop interpreter after all on_game_command_idle() calls finish */
+static gboolean
+oneshot_chimara_glk_stop(struct RunSkeinData *data)
+{
+	chimara_glk_stop(data->glk);
+	data->finished = TRUE;
+	return FALSE; /* one-shot */
+}
 
 /* Helper function: stop the interpreter when forced input is done processing;
 this signal is set up in run_entire_skein_loop() because the interpreter
@@ -202,12 +213,19 @@ on_waiting_stop_interpreter(ChimaraGlk *glk, struct RunSkeinData *data)
 {
 	if(!chimara_glk_is_line_input_pending(glk)) {
 		/* Stop the interpreter */
-		chimara_glk_stop(glk);
-		data->finished = TRUE;
+		g_idle_add((GSourceFunc)oneshot_chimara_glk_stop, data);
 
 		/* Disconnect this handler */
 		g_signal_handler_disconnect(data->glk, data->waiting_handler);
 	}
+}
+
+/* callback to call i7_story_show_pane from the main thread */
+static gboolean
+idle_story_show_pane(I7Story* story)
+{
+	i7_story_show_pane(story, I7_PANE_STORY);
+	return FALSE; /* one-shot */
 }
 
 /* Helper function: feed the commands to the interpreter after the game has
@@ -218,7 +236,7 @@ static void
 on_started_feed_commands(ChimaraGlk *glk, struct RunSkeinData *data)
 {
 	/* Display the interpreter */
-	i7_story_show_pane(data->story, I7_PANE_STORY);
+	gdk_threads_add_idle((GSourceFunc)idle_story_show_pane, data->story);
 
 	/* Feed the commands into the interpreter */
 	GSList *iter;
@@ -233,12 +251,23 @@ on_started_feed_commands(ChimaraGlk *glk, struct RunSkeinData *data)
 /* Helper function: Run the compiler output and feed the commands from the
 Skein up to a certain knot @node. Wait until the interpreter is done and stop
 it in preparation for the next knot. */
-static void
-run_entire_skein_loop(I7Node *node, struct RunSkeinData *data)
+static gboolean
+run_entire_skein_loop(struct RunSkeinData *data)
 {
 	GError *err = NULL;
 
-	data->commands = i7_skein_get_commands_to_node(data->skein, i7_skein_get_root_node(data->skein), node);
+	if(!data->node) {
+		g_slist_free(data->blessed_nodes);
+
+		chimara_glk_set_interactive(data->glk, TRUE);
+
+		g_object_unref(data->file_to_run);
+		g_slice_free(struct RunSkeinData, data);
+
+		return FALSE; /* done */
+	}
+
+	data->commands = i7_skein_get_commands_to_node(data->skein, i7_skein_get_root_node(data->skein), data->node->data);
 
 	i7_skein_reset(data->skein, TRUE);
 
@@ -270,6 +299,9 @@ run_entire_skein_loop(I7Node *node, struct RunSkeinData *data)
 finally:
 	g_slist_foreach(data->commands, (GFunc)g_free, NULL);
 	g_slist_free(data->commands);
+
+	data->node = data->node->next;
+	return TRUE; /* not done */
 }
 
 /*
@@ -294,14 +326,9 @@ i7_story_run_compiler_output_and_entire_skein(I7Story *story)
 	data->glk = CHIMARA_GLK(story->panel[side]->tabs[I7_PANE_STORY]);
 	chimara_glk_set_interactive(data->glk, FALSE);
 	
-	GSList *blessed_nodes = i7_skein_get_blessed_thread_ends(data->skein);
-	g_slist_foreach(blessed_nodes, (GFunc)run_entire_skein_loop, data);
-	g_slist_free(blessed_nodes);
-
-	chimara_glk_set_interactive(data->glk, TRUE);
-
-	g_object_unref(data->file_to_run);
-	g_slice_free(struct RunSkeinData, data);
+	data->blessed_nodes = i7_skein_get_blessed_thread_ends(data->skein);
+	data->node = data->blessed_nodes;
+	gdk_threads_add_idle((GSourceFunc)run_entire_skein_loop, data);
 }
 
 /* Helper function: stop the game in @panel if it is running */
@@ -403,20 +430,45 @@ on_game_stopped(ChimaraGlk *game, I7Story *story)
 	gtk_action_set_sensitive(stop, FALSE);
 }
 
-/* Grab commands entered by the user and store them in the skein */
-void
-on_game_command(ChimaraIF *game, gchar *input, gchar *response, I7Story *story)
+/* Temporary data for the below callback */
+typedef struct {
+	gchar *input;
+	gchar *response;
+	I7Story *story;
+} CommandData;
+
+void destroy_command_data(CommandData* data)
 {
-	I7_STORY_USE_PRIVATE(story, priv);
-	if(!input) {
+	g_free(data->input);
+	g_free(data->response);
+	g_slice_free(CommandData, data);
+}
+
+/* Grab commands entered by the user and store them in the skein */
+gboolean on_game_command_idle(CommandData* data)
+{
+	I7_STORY_USE_PRIVATE(data->story, priv);
+	if(!data->input) {
 		/* If no input, then this was either the text printed before the first 
 		 prompt, or a keypress of Enter in response to character input. */
 		I7Node *root = i7_skein_get_root_node(priv->skein);
 		if(i7_skein_get_current_node(priv->skein) == root) {
-			i7_node_set_transcript_text(root, response);
+			i7_node_set_transcript_text(root, data->response);
 		}
-		return;
+		return FALSE; /* one-shot */
 	} 
-	I7Node *node = i7_skein_new_command(priv->skein, input);
-	i7_node_set_transcript_text(node, response);
+	I7Node *node = i7_skein_new_command(priv->skein, data->input);
+	i7_node_set_transcript_text(node, data->response);
+	return FALSE; /* one-shot */
+}
+
+/* But actually do it in the main thread because creation of new nodes interacts in a few places with GooCanvas */
+void
+on_game_command(ChimaraIF *game, gchar *input, gchar *response, I7Story *story)
+{
+	CommandData* data = g_slice_new0(CommandData);
+	data->input = g_strdup(input);
+	data->response = g_strdup(response);
+	data->story = story;
+	gdk_threads_add_idle_full(G_PRIORITY_DEFAULT_IDLE, (GSourceFunc)on_game_command_idle, data, (GDestroyNotify)destroy_command_data);
 }
